@@ -1,0 +1,4 @@
+conda create -n cg2all python=3.10 
+pip install -e . flask "e3nn==0.5.0" 
+pip install "dgl==1.0.4+cu117" "numpy<2" -f https://data.dgl.ai/wheels/cu117/repo.html --force-reinstall"
+CUDA_VISIBLE_DEVICES=3 python ./cg2all/script/convert_cg2all_server.py 
