@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, send_file, after_this_request
 import numpy as np
 import torch
 import os
@@ -8,6 +8,7 @@ import time
 import torch
 import dgl
 import mdtraj
+
 os.environ["OPENMM_PLUGIN_DIR"] = "/dev/null"
 
 from cg2all.lib.libconfig import MODEL_HOME
@@ -29,6 +30,7 @@ warnings.filterwarnings("ignore")
 
 try:
     from dotenv import load_dotenv
+    
     load_dotenv()
 except ImportError:
     pass
@@ -45,7 +47,7 @@ model_type = "CalphaBasedModel"
 ckpt_fn = MODEL_HOME / f"{model_type}-FIX.ckpt"
 if not ckpt_fn.exists():
     cg2all.lib.libmodel.download_ckpt_file(model_type, ckpt_fn, True)
-    
+
 ckpt = torch.load(ckpt_fn, map_location=device)
 config = ckpt["hyper_parameters"]
 cg_model = cg2all.lib.libcg.CalphaBasedModel
@@ -66,16 +68,22 @@ print("Model has been successfully loaded")
 app = Flask(__name__)
 
 
-@app.route('/predict/<string:seq>', methods=["GET"])
-def predict(seq):
-    filename = "tmp.pdb"
+@app.route('/predict', methods=["POST"])
+def predict():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part in the request"}), 400
     
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(seq)
+    file = request.files['file']
     
-    in_pdb_fn = os.path.abspath(filename)
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    
+    in_pdb_fn = os.path.abspath("tmp.pdb")
+    
+    file.save(in_pdb_fn)
     
     return predict_all(in_pdb_fn)
+
 
 def predict_all(in_pdb_fn):
     timing = {}
@@ -93,10 +101,10 @@ def predict_all(in_pdb_fn):
     input_s = dgl.dataloading.GraphDataLoader(
         input_s, batch_size=1, num_workers=1, shuffle=False
     )
-
+    
     t0 = time.time()
     batch = next(iter(input_s)).to(device)
-    timing["loading_input"] += time.time() - t0
+    timing["loading_input"] = time.time() - t0
     #
     t0 = time.time()
     with torch.no_grad():
@@ -111,9 +119,8 @@ def predict_all(in_pdb_fn):
     output.save(out_fn)
     if len(ssbond_s[0]) > 0:
         write_SSBOND(out_fn, output.top, ssbond_s[0])
-    with open(out_fn, "r") as f:
-        result_data = f.read()
-    json = jsonify({"result": result_data})
+    out_fn = os.path.abspath(out_fn)
+    
     timing["writing_output"] = time.time() - timing["writing_output"]
     
     if device.type == "cuda":
@@ -125,14 +132,19 @@ def predict_all(in_pdb_fn):
         
         torch.cuda.empty_cache()
     
-    if os.path.exists(in_pdb_fn):
-        os.remove(in_pdb_fn)
-    if os.path.exists(out_fn):
-        os.remove(out_fn)
-        
+    @after_this_request
+    def cleanup(response):
+        try:
+            if os.path.exists(in_pdb_fn): os.remove(in_pdb_fn)
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        return response
+    
     print(timing)
     
-    return json
+    # download_name is what the user sees, mimetype ensures raw text stream
+    return send_file(out_fn, mimetype='text/plain', as_attachment=False)
+
 
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
